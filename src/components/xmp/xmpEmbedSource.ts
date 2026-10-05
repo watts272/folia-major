@@ -1,8 +1,10 @@
 /**
  * XMP Host → Folia WebLyricSource
- * AGPL-3.0: 本文件用于与 Folia(AGPL) 同构建，衍生作品须遵守 AGPL。
+ * AGPL-3.0：与 Folia 同构建，衍生作品须遵守 AGPL。
+ *
+ * Folia Line 必须包含 words[]（逐字/词时间），仅 fullText 时多数模式不渲染歌词。
  */
-import type { LyricData, Line } from '../../types';
+import type { LyricData, Line, Word } from '../../types';
 import type {
   WebLyricSource,
   WebLyricSourceState,
@@ -27,31 +29,73 @@ export type XmpHostMessage =
     }
   | { type: 'xmp-folia-ping' };
 
-function toLyricData(lines: Array<{ t: number; text: string; tr?: string }> | undefined): LyricData | null {
-  if (!lines || !lines.length) return null;
-  const out: Line[] = lines.map((L, i) => ({
-    id: `xmp-${i}`,
-    startTime: Math.max(0, Number(L.t) || 0),
-    // Folia Line 字段因版本略有差异；Obs 路径主要用 startTime + words/fullText
-    endTime: undefined as unknown as number,
-    fullText: String(L.text || ''),
-    text: String(L.text || ''),
-    words: [],
-    translation: L.tr ? String(L.tr) : undefined,
-  })) as Line[];
-  // 填 endTime
-  for (let i = 0; i < out.length; i++) {
-    const next = out[i + 1];
-    (out[i] as { endTime?: number }).endTime = next
-      ? next.startTime
-      : out[i].startTime + 5;
+/** 把一行文本拆成 Word[]，时间均分在 [start, end) */
+function buildWords(text: string, start: number, end: number): Word[] {
+  const raw = String(text || '');
+  if (!raw) return [{ text: ' ', startTime: start, endTime: end }];
+
+  // 优先按空白分词；无空白则按字符（中文歌词）
+  const hasSpace = /\s/.test(raw);
+  let parts: string[];
+  if (hasSpace) {
+    parts = raw.split(/(\s+)/).filter((p) => p.length > 0);
+  } else {
+    parts = Array.from(raw);
   }
-  return { lines: out } as LyricData;
+
+  const dur = Math.max(0.05, end - start);
+  const n = Math.max(1, parts.length);
+  const slice = dur / n;
+  const words: Word[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const t0 = start + i * slice;
+    const t1 = i === parts.length - 1 ? end : start + (i + 1) * slice;
+    words.push({ text: parts[i], startTime: t0, endTime: t1 });
+  }
+  return words;
+}
+
+function toLyricData(
+  lines: Array<{ t: number; text: string; tr?: string }> | undefined,
+  durationHint?: number
+): LyricData | null {
+  if (!lines || !lines.length) return null;
+
+  const out: Line[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    const start = Math.max(0, Number(L.t) || 0);
+    const nextT = i + 1 < lines.length ? Math.max(0, Number(lines[i + 1].t) || 0) : 0;
+    let end =
+      nextT > start
+        ? nextT
+        : durationHint && durationHint > start
+          ? Math.min(durationHint, start + 5)
+          : start + 4;
+    if (end <= start) end = start + 0.5;
+
+    const fullText = String(L.text || '').trim() || ' ';
+    const words = buildWords(fullText, start, end);
+    out.push({
+      id: `xmp-${i}`,
+      startTime: start,
+      endTime: end,
+      fullText,
+      words,
+      translation: L.tr ? String(L.tr) : undefined,
+    });
+  }
+
+  return {
+    lines: out,
+    isWordByWord: false,
+  };
 }
 
 export function createXmpEmbedSource(): WebLyricSource & {
   applyMessage: (data: XmpHostMessage) => void;
   getModeHint: () => string | null;
+  subscribe: (fn: () => void) => () => void;
 } {
   let state: WebLyricSourceState = {
     ...initialWebLyricSourceState(),
@@ -62,7 +106,11 @@ export function createXmpEmbedSource(): WebLyricSource & {
 
   const notify = () => {
     listeners.forEach((fn) => {
-      try { fn(); } catch { /* ignore */ }
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
     });
   };
 
@@ -74,11 +122,15 @@ export function createXmpEmbedSource(): WebLyricSource & {
       const c = state.clock;
       if (!c.playing || !c.anchoredAtMs) return c.positionSec;
       const dt = Math.max(0, (nowMs - c.anchoredAtMs) / 1000);
-      return c.positionSec + dt;
+      const t = c.positionSec + dt;
+      if (c.durationSec > 0) return Math.min(t, c.durationSec);
+      return t;
     },
     subscribe(fn: () => void) {
       listeners.add(fn);
-      return () => listeners.delete(fn);
+      return () => {
+        listeners.delete(fn);
+      };
     },
     getModeHint() {
       return modeHint;
@@ -87,8 +139,10 @@ export function createXmpEmbedSource(): WebLyricSource & {
       if (!data || !data.type) return;
       if (data.type === 'xmp-folia-ping') {
         try {
-          window.parent.postMessage({ type: 'xmp-folia-pong' }, '*');
-        } catch { /* ignore */ }
+          window.parent.postMessage({ type: 'xmp-folia-pong', ok: true }, '*');
+        } catch {
+          /* ignore */
+        }
         return;
       }
       if (data.type === 'xmp-folia-session') {
@@ -96,6 +150,11 @@ export function createXmpEmbedSource(): WebLyricSource & {
         const duration = Math.max(0, Number(data.duration) || 0);
         const playing = !!data.playing;
         if (data.mode) modeHint = String(data.mode);
+
+        const lyrics = data.lines
+          ? toLyricData(data.lines, duration)
+          : state.lyrics;
+
         state = {
           connectionStatus: 'connected',
           playerState: playing ? 'playing' : 'paused',
@@ -107,7 +166,7 @@ export function createXmpEmbedSource(): WebLyricSource & {
                 seed: data.track.id || data.track.name || 'xmp',
               }
             : state.track,
-          lyrics: data.lines ? toLyricData(data.lines) : state.lyrics,
+          lyrics,
           clock: {
             positionSec: position,
             durationSec: duration || state.clock.durationSec,
@@ -115,6 +174,18 @@ export function createXmpEmbedSource(): WebLyricSource & {
             playing,
           },
         };
+        try {
+          window.parent.postMessage(
+            {
+              type: 'xmp-folia-pong',
+              ok: true,
+              lines: lyrics?.lines?.length || 0,
+            },
+            '*'
+          );
+        } catch {
+          /* ignore */
+        }
         notify();
         return;
       }
@@ -127,7 +198,8 @@ export function createXmpEmbedSource(): WebLyricSource & {
           playerState: playing ? 'playing' : 'paused',
           clock: {
             positionSec: position,
-            durationSec: data.duration != null ? Number(data.duration) : state.clock.durationSec,
+            durationSec:
+              data.duration != null ? Number(data.duration) : state.clock.durationSec,
             anchoredAtMs: Date.now(),
             playing,
           },
