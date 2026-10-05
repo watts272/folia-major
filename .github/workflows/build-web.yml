@@ -17,7 +17,10 @@ jobs:
       - name: Install
         run: npm install
 
+      # 把下面换成你自己的网易云 API 地址
       - name: Build
+        env:
+          VITE_NETEASE_API_BASE: https://你的网易云API域名
         run: npm run build -- --base=./
 
       - name: Upload dist
