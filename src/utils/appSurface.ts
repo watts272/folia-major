@@ -12,4 +12,11 @@ export const obsSourceKind = searchParams.get('obsSource');
 
 export const isRemoteControlSurface = !isObsBrowserSourceSurface && searchParams.get('remote') === '1';
 
-export const isMainAppSurface = typeof window !== 'undefined' && !isObsBrowserSourceSurface && !isRemoteControlSurface;
+/** XMP 音乐播放器 iframe 嵌入：?xmpEmbed=1 或 ?xmp=1 */
+export const isXmpEmbedSurface = typeof window !== 'undefined'
+    && (searchParams.get('xmpEmbed') === '1' || searchParams.get('xmp') === '1');
+
+export const isMainAppSurface = typeof window !== 'undefined'
+    && !isObsBrowserSourceSurface
+    && !isRemoteControlSurface
+    && !isXmpEmbedSurface;
