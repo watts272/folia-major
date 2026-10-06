@@ -7,20 +7,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
 
-      - name: Install
+      - name: Install dependencies
         run: npm install
 
-      # 把下面换成你自己的网易云 API 地址
+      # Android WebView 需要相对路径 base；网易云 API 写入前端
       - name: Build
         env:
-          VITE_NETEASE_API_BASE: https://你的网易云API域名
+          VITE_NETEASE_API_BASE: https://api-enhanced-five-ashy.vercel.app
         run: npm run build -- --base=./
 
       - name: Upload dist
